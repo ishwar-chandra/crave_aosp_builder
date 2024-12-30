@@ -502,6 +502,10 @@ jobs:
         # Set up build environment
         export BUILD_USERNAME=${{ github.actor }} ; \
         export BUILD_HOSTNAME=crave ; \
+        rm -rf vendor/qcom/opensource/fwk-detect \
+        rm -rf hardware/qcom-caf/sm* \
+        rm -rf hardware/qcom-caf/msm* \
+        rm -rf hardware/qcom-caf/sdm* \
         source build/envsetup.sh && \
 
         echo "Repository: ${{ github.repository }}"; \
