@@ -54,7 +54,7 @@ on:
       BUILD_COMMAND:
         description: 'Command to be used for compiling:'
         required: true
-        default: 'mka bacon'
+        default: ' ALLOW_MISSING_DEPENDENCIES=true mka bacon'
       BUILD_TYPE:
         description: 'Type of build:'
         required: true
@@ -501,7 +501,8 @@ jobs:
 
         # Set up build environment
         export BUILD_USERNAME=${{ github.actor }} ; \
-        export BUILD_HOSTNAME=crave ; \
+        export BUILD_HOSTNAME=kurisu ; \
+        export ALLOW_MISSING_DEPENDENCIES=true ; \
         rm -rf vendor/qcom/opensource/fwk-detect ; \
         rm -rf hardware/qcom-caf/sm* hardware/qcom-caf/sdm* hardware/qcom-caf/msm* ; \
         source build/envsetup.sh && \
