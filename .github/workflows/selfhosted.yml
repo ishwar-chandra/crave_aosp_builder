@@ -503,6 +503,7 @@ jobs:
         export BUILD_USERNAME=${{ github.actor }} ; \
         export BUILD_HOSTNAME=kurisu ; \
         export ALLOW_MISSING_DEPENDENCIES=true ; \
+        export SELINUX_IGNORE_NEVERALLOWS=true ; \
         rm -rf vendor/qcom/opensource/fwk-detect ; \
         rm -rf hardware/qcom-caf/sm* hardware/qcom-caf/sdm* hardware/qcom-caf/msm* ; \
         source build/envsetup.sh && \
