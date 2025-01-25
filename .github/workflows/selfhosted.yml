@@ -509,7 +509,6 @@ jobs:
         rm -rf hardware/qcom-caf/sm* hardware/qcom-caf/sdm* hardware/qcom-caf/msm* ; \
         . device/motorola/targets/scripts/replace_camera_sepolicy.sh ; \
         sed -i '124,125d' vendor/lineage/config/common.mk  ; \
-        cd vendor/gapps && git fetch https://github.como/aldair69/vendor_gapps && git cherry-pick 7b3e535cbad966bd67827de7fec4108b9c2a8a8f && git cherry-pick eaeba3656e8932f3b0d1e33232419af210b31b2c && cat arm64/arm64-vendor.mk && cat arm64/Android.bp && cd ../../ ; \
         source build/envsetup.sh && \
 
         echo "Repository: ${{ github.repository }}"; \
