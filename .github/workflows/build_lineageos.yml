@@ -1,4 +1,7 @@
-name: Build Latest LineageOS with GApps
+name: Build LineageOS with GApps for Moto G8 Plus
+
+# This workflow builds LineageOS with Google Apps for the Moto G8 Plus (doha/amogus_doha)
+# It uses GitHub Actions to perform the build in the cloud
 
 on:
   workflow_dispatch:
@@ -7,6 +10,7 @@ on:
         description: 'Device codename'
         required: true
         default: 'amogus_doha'
+        type: string
       BUILD_TYPE:
         description: 'Build type (lineage or gapps)'
         required: true
@@ -49,30 +53,46 @@ on:
         required: true
         default: 'lineage-22'
 
+# Prevent concurrent builds of the same workflow on the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build LineageOS ROM
+    runs-on: ubuntu-24.04
     timeout-minutes: 1440  # 24 hours max
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Set up build environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python-is-python3 repo
+          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick \
+            lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev \
+            libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python-is-python3 repo
+          echo "Build environment set up successfully"
 
-      - name: Setup ccache
+      - name: Set up ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          max-size: 10G
+          max-size: 15G
+          key: ccache-${{ github.workflow }}-${{ github.job }}-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ github.workflow }}-${{ github.job }}-${{ github.ref }}
+            ccache-${{ github.workflow }}-${{ github.job }}
 
       - name: Initialize repo
         run: |
           mkdir -p ~/android/lineage
           cd ~/android/lineage
           repo init -u https://github.com/LineageOS/android.git -b ${{ github.event.inputs.LINEAGE_BRANCH }}
+          echo "Repo initialized with branch: ${{ github.event.inputs.LINEAGE_BRANCH }}"
 
       - name: Create local manifests
         run: |
@@ -107,16 +127,22 @@ jobs:
           EOF
           fi
 
+          echo "Local manifests created successfully"
+
       - name: Sync repositories
         run: |
           cd ~/android/lineage
           repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+          echo "Repositories synced successfully"
+        continue-on-error: false
 
       - name: Display LineageOS version
         run: |
           cd ~/android/lineage
           echo "Building LineageOS branch: ${{ github.event.inputs.LINEAGE_BRANCH }}"
           echo "This will build the latest version available in this branch"
+          echo "Device: ${{ github.event.inputs.DEVICE_NAME }}"
+          echo "Build type: ${{ github.event.inputs.BUILD_TYPE }}"
 
       - name: Modify device configuration for GApps
         if: github.event.inputs.BUILD_TYPE == 'gapps'
@@ -125,12 +151,14 @@ jobs:
           # Add GApps to device configuration
           echo '# Include GApps' >> device/motorola/amogus_doha/lineage_amogus_doha.mk
           echo '$(call inherit-product, vendor/gapps/arm64/arm64-vendor.mk)' >> device/motorola/amogus_doha/lineage_amogus_doha.mk
+          echo "Device configuration modified to include GApps"
 
       - name: Set up build environment
         run: |
           cd ~/android/lineage
           source build/envsetup.sh
           breakfast ${{ github.event.inputs.DEVICE_NAME }}
+          echo "Build environment set up for ${{ github.event.inputs.DEVICE_NAME }}"
 
       - name: Build ROM
         run: |
@@ -140,27 +168,61 @@ jobs:
           ccache -M 50G
           # Set official build flag to include Updater app
           export OFFICIAL_BUILD=true
-          # Modify updater URL to point to your own server if you plan to use OTA updates
-          # sed -i 's|https://download.lineageos.org|https://your-update-server.com|g' packages/apps/Updater/res/values/config.xml
+          # Build with all available cores
           mka bacon -j$(nproc --all)
+          echo "ROM build completed"
 
-      - name: Find and upload ROM
-        uses: actions/upload-artifact@v3
+      - name: Find ROM file
+        id: find-rom
+        run: |
+          cd ~/android/lineage
+          ROM_FILE=$(find out/target/product/${{ github.event.inputs.DEVICE_NAME }} -name "lineage-*.zip" | head -1)
+          echo "ROM file found: $ROM_FILE"
+          echo "rom_file=$ROM_FILE" >> $GITHUB_OUTPUT
+
+          # Also find recovery image
+          RECOVERY_IMG=$(find out/target/product/${{ github.event.inputs.DEVICE_NAME }} -name "boot.img" | head -1)
+          echo "Recovery image found: $RECOVERY_IMG"
+          echo "recovery_img=$RECOVERY_IMG" >> $GITHUB_OUTPUT
+
+      - name: Upload ROM as artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: lineage-rom
-          path: ~/android/lineage/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/lineage-*.zip
+          name: lineage-rom-${{ github.event.inputs.DEVICE_NAME }}
+          path: ${{ steps.find-rom.outputs.rom_file }}
+          retention-days: 7
+
+      - name: Upload recovery image as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-${{ github.event.inputs.DEVICE_NAME }}
+          path: ${{ steps.find-rom.outputs.recovery_img }}
+          retention-days: 7
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          files: ~/android/lineage/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/lineage-*.zip
+          files: |
+            ${{ steps.find-rom.outputs.rom_file }}
+            ${{ steps.find-rom.outputs.recovery_img }}
           tag_name: lineage-${{ github.run_number }}
-          name: LineageOS ${{ github.event.inputs.LINEAGE_BRANCH }} with GApps for ${{ github.event.inputs.DEVICE_NAME }}
+          name: LineageOS ${{ github.event.inputs.LINEAGE_BRANCH }} for ${{ github.event.inputs.DEVICE_NAME }}
           body: |
-            LineageOS ${{ github.event.inputs.LINEAGE_BRANCH }} with GApps for ${{ github.event.inputs.DEVICE_NAME }}
-            Built on: ${{ github.event.repository.updated_at }}
-            Build type: ${{ github.event.inputs.BUILD_TYPE }}
-            Branch: ${{ github.event.inputs.LINEAGE_BRANCH }}
+            # LineageOS ${{ github.event.inputs.LINEAGE_BRANCH }} for ${{ github.event.inputs.DEVICE_NAME }}
+
+            **Build Information:**
+            - Build date: ${{ github.event.repository.updated_at }}
+            - Build type: ${{ github.event.inputs.BUILD_TYPE }}
+            - Branch: ${{ github.event.inputs.LINEAGE_BRANCH }}
+            - Device: ${{ github.event.inputs.DEVICE_NAME }}
+
+            **Installation Instructions:**
+            1. Boot into recovery mode
+            2. Perform a factory reset (wipe data/factory reset)
+            3. Flash the ROM zip file
+            4. Reboot your device
+
+            **Note:** This is an unofficial build. Use at your own risk.
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
