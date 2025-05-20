@@ -1,0 +1,156 @@
+name: Build LineageOS with GApps
+
+on:
+  workflow_dispatch:
+    inputs:
+      DEVICE_NAME:
+        description: 'Device codename'
+        required: true
+        default: 'amogus_doha'
+      BUILD_TYPE:
+        description: 'Build type (lineage or gapps)'
+        required: true
+        default: 'gapps'
+        type: choice
+        options:
+          - lineage
+          - gapps
+      LINEAGE_BRANCH:
+        description: 'LineageOS branch'
+        required: true
+        default: 'lineage-22.2'
+      DEVICE_TREE_URL:
+        description: 'Device tree repository URL'
+        required: true
+        default: 'https://github.com/Aldair69/android_device_motorola_amogus_doha'
+      DEVICE_TREE_BRANCH:
+        description: 'Device tree branch'
+        required: true
+        default: 'lineage-22'
+      KERNEL_SOURCE_URL:
+        description: 'Kernel source repository URL'
+        required: true
+        default: 'https://github.com/Aldair69/android_kernel_motorola_msm-4.14'
+      KERNEL_SOURCE_BRANCH:
+        description: 'Kernel source branch'
+        required: true
+        default: 'lineage-22'
+      VENDOR_SOURCE_URL:
+        description: 'Vendor source repository URL'
+        required: true
+        default: 'https://github.com/Aldair69/android_vendor_motorola_amogus_doha'
+      VENDOR_SOURCE_BRANCH:
+        description: 'Vendor source branch'
+        required: true
+        default: 'lineage-22'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1440  # 24 hours max
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+
+      - name: Set up build environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python-is-python3 repo
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          max-size: 10G
+
+      - name: Initialize repo
+        run: |
+          mkdir -p ~/android/lineage
+          cd ~/android/lineage
+          repo init -u https://github.com/LineageOS/android.git -b ${{ github.event.inputs.LINEAGE_BRANCH }}
+
+      - name: Create local manifests
+        run: |
+          mkdir -p ~/android/lineage/.repo/local_manifests
+          
+          # Create device manifest
+          cat > ~/android/lineage/.repo/local_manifests/doha.xml << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <!-- Device Tree -->
+            <project name="${{ github.event.inputs.DEVICE_TREE_URL }}" path="device/motorola/amogus_doha" remote="github" revision="${{ github.event.inputs.DEVICE_TREE_BRANCH }}" />
+            
+            <!-- Kernel -->
+            <project name="${{ github.event.inputs.KERNEL_SOURCE_URL }}" path="kernel/motorola/msm-4.14" remote="github" revision="${{ github.event.inputs.KERNEL_SOURCE_BRANCH }}" />
+            
+            <!-- Vendor Blobs -->
+            <project name="${{ github.event.inputs.VENDOR_SOURCE_URL }}" path="vendor/motorola/amogus_doha" remote="github" revision="${{ github.event.inputs.VENDOR_SOURCE_BRANCH }}" />
+            
+            <!-- Common Device Tree -->
+            <project name="moto-common/android_device_motorola_common" path="device/motorola/common" remote="github" revision="lineage-22" />
+          </manifest>
+          EOF
+          
+          # Create GApps manifest if needed
+          if [ "${{ github.event.inputs.BUILD_TYPE }}" = "gapps" ]; then
+            cat > ~/android/lineage/.repo/local_manifests/gapps.xml << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <remote name="gitlab" fetch="https://gitlab.com/" />
+            <project path="vendor/gapps" name="MindTheGapps/vendor_gapps" remote="gitlab" revision="android-15.0" />
+          </manifest>
+          EOF
+          fi
+
+      - name: Sync repositories
+        run: |
+          cd ~/android/lineage
+          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+
+      - name: Modify device configuration for GApps
+        if: github.event.inputs.BUILD_TYPE == 'gapps'
+        run: |
+          cd ~/android/lineage
+          # Add GApps to device configuration
+          echo '# Include GApps' >> device/motorola/amogus_doha/lineage_amogus_doha.mk
+          echo '$(call inherit-product, vendor/gapps/arm64/arm64-vendor.mk)' >> device/motorola/amogus_doha/lineage_amogus_doha.mk
+
+      - name: Set up build environment
+        run: |
+          cd ~/android/lineage
+          source build/envsetup.sh
+          breakfast ${{ github.event.inputs.DEVICE_NAME }}
+
+      - name: Build ROM
+        run: |
+          cd ~/android/lineage
+          export USE_CCACHE=1
+          export CCACHE_EXEC=/usr/bin/ccache
+          ccache -M 50G
+          mka bacon -j$(nproc --all)
+
+      - name: Find and upload ROM
+        uses: actions/upload-artifact@v3
+        with:
+          name: lineage-rom
+          path: ~/android/lineage/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/lineage-*.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ~/android/lineage/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/lineage-*.zip
+          tag_name: lineage-${{ github.run_number }}
+          name: LineageOS 22.2 with GApps for ${{ github.event.inputs.DEVICE_NAME }}
+          body: |
+            LineageOS 22.2 with GApps for ${{ github.event.inputs.DEVICE_NAME }}
+            Built on: ${{ github.event.repository.updated_at }}
+            Build type: ${{ github.event.inputs.BUILD_TYPE }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
+      - name: Send Telegram Notification
+        if: ${{ success() && secrets.TG_TOKEN != '' && secrets.TG_CHAT_ID != '' }}
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_TOKEN }}/sendMessage \
+            -d chat_id=${{ secrets.TG_CHAT_ID }} \
+            -d text="✅ LineageOS 22.2 with GApps for ${{ github.event.inputs.DEVICE_NAME }} build completed! Download from: https://github.com/${{ github.repository }}/releases/tag/lineage-${{ github.run_number }}"
