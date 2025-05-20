@@ -74,8 +74,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick \
-            lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev \
-            libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python-is-python3 repo
+            lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev \
+            libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python-is-python3
+
+          # Install repo tool manually since it might not be in the repositories
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          export PATH=~/bin:$PATH
+
           echo "Build environment set up successfully"
 
       - name: Set up ccache
@@ -91,6 +98,8 @@ jobs:
         run: |
           mkdir -p ~/android/lineage
           cd ~/android/lineage
+          # Ensure repo is in PATH
+          export PATH=~/bin:$PATH
           repo init -u https://github.com/LineageOS/android.git -b ${{ github.event.inputs.LINEAGE_BRANCH }}
           echo "Repo initialized with branch: ${{ github.event.inputs.LINEAGE_BRANCH }}"
 
@@ -132,8 +141,24 @@ jobs:
       - name: Sync repositories
         run: |
           cd ~/android/lineage
-          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
-          echo "Repositories synced successfully"
+          # Ensure repo is in PATH
+          export PATH=~/bin:$PATH
+          # Try syncing with retries in case of network issues
+          for i in {1..3}; do
+            echo "Attempt $i to sync repositories..."
+            if repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags; then
+              echo "Repositories synced successfully"
+              break
+            else
+              echo "Sync attempt $i failed, retrying in 10 seconds..."
+              sleep 10
+            fi
+            # If this is the last attempt and it failed, exit with error
+            if [ $i -eq 3 ]; then
+              echo "All sync attempts failed. Exiting."
+              exit 1
+            fi
+          done
         continue-on-error: false
 
       - name: Display LineageOS version
@@ -156,33 +181,71 @@ jobs:
       - name: Set up build environment
         run: |
           cd ~/android/lineage
+          # Ensure repo is in PATH
+          export PATH=~/bin:$PATH
           source build/envsetup.sh
-          breakfast ${{ github.event.inputs.DEVICE_NAME }}
+          # Try breakfast with error handling
+          if ! breakfast ${{ github.event.inputs.DEVICE_NAME }}; then
+            echo "Error: breakfast command failed. Check if device configuration is correct."
+            exit 1
+          fi
           echo "Build environment set up for ${{ github.event.inputs.DEVICE_NAME }}"
 
       - name: Build ROM
         run: |
           cd ~/android/lineage
+          # Ensure repo is in PATH
+          export PATH=~/bin:$PATH
           export USE_CCACHE=1
           export CCACHE_EXEC=/usr/bin/ccache
           ccache -M 50G
           # Set official build flag to include Updater app
           export OFFICIAL_BUILD=true
+
+          # Check disk space before building
+          echo "Available disk space before build:"
+          df -h .
+
           # Build with all available cores
-          mka bacon -j$(nproc --all)
-          echo "ROM build completed"
+          echo "Starting build with $(nproc --all) cores..."
+          if ! mka bacon -j$(nproc --all); then
+            echo "Error: Build failed. Check the logs for details."
+            exit 1
+          fi
+
+          echo "ROM build completed successfully"
+
+          # Check disk space after building
+          echo "Available disk space after build:"
+          df -h .
 
       - name: Find ROM file
         id: find-rom
         run: |
           cd ~/android/lineage
+          # Check if output directory exists
+          if [ ! -d "out/target/product/${{ github.event.inputs.DEVICE_NAME }}" ]; then
+            echo "Error: Output directory not found. Build may have failed."
+            exit 1
+          fi
+
+          # Find ROM file
           ROM_FILE=$(find out/target/product/${{ github.event.inputs.DEVICE_NAME }} -name "lineage-*.zip" | head -1)
+          if [ -z "$ROM_FILE" ]; then
+            echo "Error: ROM zip file not found. Build may have failed."
+            exit 1
+          fi
           echo "ROM file found: $ROM_FILE"
           echo "rom_file=$ROM_FILE" >> $GITHUB_OUTPUT
 
           # Also find recovery image
           RECOVERY_IMG=$(find out/target/product/${{ github.event.inputs.DEVICE_NAME }} -name "boot.img" | head -1)
-          echo "Recovery image found: $RECOVERY_IMG"
+          if [ -z "$RECOVERY_IMG" ]; then
+            echo "Warning: Recovery image not found."
+            RECOVERY_IMG=""
+          else
+            echo "Recovery image found: $RECOVERY_IMG"
+          fi
           echo "recovery_img=$RECOVERY_IMG" >> $GITHUB_OUTPUT
 
       - name: Upload ROM as artifact
@@ -193,11 +256,33 @@ jobs:
           retention-days: 7
 
       - name: Upload recovery image as artifact
+        if: steps.find-rom.outputs.recovery_img != ''
         uses: actions/upload-artifact@v4
         with:
           name: recovery-${{ github.event.inputs.DEVICE_NAME }}
           path: ${{ steps.find-rom.outputs.recovery_img }}
           retention-days: 7
+
+      - name: Prepare release files
+        id: prepare-release
+        run: |
+          # Create a list of files to include in the release
+          FILES="${{ steps.find-rom.outputs.rom_file }}"
+          if [ -n "${{ steps.find-rom.outputs.recovery_img }}" ]; then
+            FILES="$FILES ${{ steps.find-rom.outputs.recovery_img }}"
+          fi
+          echo "release_files=$FILES" >> $GITHUB_OUTPUT
+
+          # Generate SHA256 checksums
+          cd ~/android/lineage
+          CHECKSUM_FILE="lineage-${{ github.run_number }}-${{ github.event.inputs.DEVICE_NAME }}-sha256sums.txt"
+          if [ -f "${{ steps.find-rom.outputs.rom_file }}" ]; then
+            sha256sum "$(basename "${{ steps.find-rom.outputs.rom_file }}")" > "$CHECKSUM_FILE"
+          fi
+          if [ -n "${{ steps.find-rom.outputs.recovery_img }}" ] && [ -f "${{ steps.find-rom.outputs.recovery_img }}" ]; then
+            sha256sum "$(basename "${{ steps.find-rom.outputs.recovery_img }}")" >> "$CHECKSUM_FILE"
+          fi
+          echo "checksum_file=$CHECKSUM_FILE" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -205,6 +290,7 @@ jobs:
           files: |
             ${{ steps.find-rom.outputs.rom_file }}
             ${{ steps.find-rom.outputs.recovery_img }}
+            ~/android/lineage/${{ steps.prepare-release.outputs.checksum_file }}
           tag_name: lineage-${{ github.run_number }}
           name: LineageOS ${{ github.event.inputs.LINEAGE_BRANCH }} for ${{ github.event.inputs.DEVICE_NAME }}
           body: |
@@ -223,6 +309,9 @@ jobs:
             4. Reboot your device
 
             **Note:** This is an unofficial build. Use at your own risk.
+
+            **SHA256 Checksums:**
+            Please verify the integrity of your downloads using the provided SHA256 checksums file.
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
