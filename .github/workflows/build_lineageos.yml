@@ -1,4 +1,4 @@
-name: Build LineageOS with GApps
+name: Build Latest LineageOS with GApps
 
 on:
   workflow_dispatch:
@@ -18,7 +18,12 @@ on:
       LINEAGE_BRANCH:
         description: 'LineageOS branch'
         required: true
-        default: 'lineage-22.2'
+        default: 'lineage-22.0'
+        type: choice
+        options:
+          - lineage-22.0
+          - lineage-22.1
+          - lineage-22.2
       DEVICE_TREE_URL:
         description: 'Device tree repository URL'
         required: true
@@ -72,25 +77,25 @@ jobs:
       - name: Create local manifests
         run: |
           mkdir -p ~/android/lineage/.repo/local_manifests
-          
+
           # Create device manifest
           cat > ~/android/lineage/.repo/local_manifests/doha.xml << EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <manifest>
             <!-- Device Tree -->
             <project name="${{ github.event.inputs.DEVICE_TREE_URL }}" path="device/motorola/amogus_doha" remote="github" revision="${{ github.event.inputs.DEVICE_TREE_BRANCH }}" />
-            
+
             <!-- Kernel -->
             <project name="${{ github.event.inputs.KERNEL_SOURCE_URL }}" path="kernel/motorola/msm-4.14" remote="github" revision="${{ github.event.inputs.KERNEL_SOURCE_BRANCH }}" />
-            
+
             <!-- Vendor Blobs -->
             <project name="${{ github.event.inputs.VENDOR_SOURCE_URL }}" path="vendor/motorola/amogus_doha" remote="github" revision="${{ github.event.inputs.VENDOR_SOURCE_BRANCH }}" />
-            
+
             <!-- Common Device Tree -->
             <project name="moto-common/android_device_motorola_common" path="device/motorola/common" remote="github" revision="lineage-22" />
           </manifest>
           EOF
-          
+
           # Create GApps manifest if needed
           if [ "${{ github.event.inputs.BUILD_TYPE }}" = "gapps" ]; then
             cat > ~/android/lineage/.repo/local_manifests/gapps.xml << EOF
@@ -106,6 +111,12 @@ jobs:
         run: |
           cd ~/android/lineage
           repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+
+      - name: Display LineageOS version
+        run: |
+          cd ~/android/lineage
+          echo "Building LineageOS branch: ${{ github.event.inputs.LINEAGE_BRANCH }}"
+          echo "This will build the latest version available in this branch"
 
       - name: Modify device configuration for GApps
         if: github.event.inputs.BUILD_TYPE == 'gapps'
@@ -127,6 +138,10 @@ jobs:
           export USE_CCACHE=1
           export CCACHE_EXEC=/usr/bin/ccache
           ccache -M 50G
+          # Set official build flag to include Updater app
+          export OFFICIAL_BUILD=true
+          # Modify updater URL to point to your own server if you plan to use OTA updates
+          # sed -i 's|https://download.lineageos.org|https://your-update-server.com|g' packages/apps/Updater/res/values/config.xml
           mka bacon -j$(nproc --all)
 
       - name: Find and upload ROM
@@ -140,17 +155,23 @@ jobs:
         with:
           files: ~/android/lineage/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/lineage-*.zip
           tag_name: lineage-${{ github.run_number }}
-          name: LineageOS 22.2 with GApps for ${{ github.event.inputs.DEVICE_NAME }}
+          name: LineageOS ${{ github.event.inputs.LINEAGE_BRANCH }} with GApps for ${{ github.event.inputs.DEVICE_NAME }}
           body: |
-            LineageOS 22.2 with GApps for ${{ github.event.inputs.DEVICE_NAME }}
+            LineageOS ${{ github.event.inputs.LINEAGE_BRANCH }} with GApps for ${{ github.event.inputs.DEVICE_NAME }}
             Built on: ${{ github.event.repository.updated_at }}
             Build type: ${{ github.event.inputs.BUILD_TYPE }}
+            Branch: ${{ github.event.inputs.LINEAGE_BRANCH }}
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
       - name: Send Telegram Notification
-        if: ${{ success() && secrets.TG_TOKEN != '' && secrets.TG_CHAT_ID != '' }}
+        if: success()
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_TOKEN }}/sendMessage \
-            -d chat_id=${{ secrets.TG_CHAT_ID }} \
-            -d text="✅ LineageOS 22.2 with GApps for ${{ github.event.inputs.DEVICE_NAME }} build completed! Download from: https://github.com/${{ github.repository }}/releases/tag/lineage-${{ github.run_number }}"
+          if [ -n "$TG_TOKEN" ] && [ -n "$TG_CHAT_ID" ]; then
+            curl -s -X POST https://api.telegram.org/bot$TG_TOKEN/sendMessage \
+              -d chat_id=$TG_CHAT_ID \
+              -d text="✅ LineageOS ${{ github.event.inputs.LINEAGE_BRANCH }} with GApps for ${{ github.event.inputs.DEVICE_NAME }} build completed! Download from: https://github.com/${{ github.repository }}/releases/tag/lineage-${{ github.run_number }}"
+          fi
